@@ -1,9 +1,10 @@
 ######################################
-## Script 02. Join extracts ##########
+## Script 03. Join extracts ##########
 ######################################
 
-###Step 1 load data and use CHI database to convert CHI to UPIs
-## 
+###Step 1 load data and the CHI team lookup to convert CHIs to UPIs
+##the lookup is requested in "02.Compile CHI list.r" - the CHI team return
+##our list of CHI numbers with a "upi" column added
 smr_all<- readRDS("/PHI_conf/Dementia_Index/data/cleaned_extracts/smr_first_icd10.rds") %>% ungroup()
 PDS <- readRDS("/PHI_conf/Dementia_Index/data/cleaned_extracts/PDS_clean.rds") %>% ungroup()
 dementia_deaths <- readRDS("/PHI_conf/Dementia_Index/data/extracts/dementia_deaths.rds")%>% ungroup()
@@ -12,22 +13,17 @@ social_care <- readRDS("/PHI_conf/Dementia_Index/data/cleaned_extracts/SC_clean.
 PIS <- readRDS("/PHI_conf/Dementia_Index/data/cleaned_extracts/pis_clean.rds")%>% ungroup()
 
 ####CHI to UPI ####
-##SMRA sources should be OK.
-names(PDS)
-clear_temp_tables(SMRAConnection)
-##test using pds
-upis <- SMRAConnection %>% tbl(dbplyr::in_schema("UPIP", "L_UPI_DATA")) %>% 
-  inner_join(CHC %>% rename(CHI_NUMBER = CHC_UPI_NUMBER), copy = TRUE) %>%
-  filter(is.na(DELETION_INDICATOR)) %>% # remove any that have been marked as deleted
-  select(CHI_NUMBER,UPI_NUMBER, DATE_OF_BIRTH, CURRENT_POSTCODE, PREVIOUS_POSTCODE, DATE_ADDRESS_CHANGED) %>%
-  distinct() %>% 
-  collect() %>% 
-  rename(upi = CHI_NUMBER,
-         chi_dob = DATE_OF_BIRTH, 
-         chi_current_postcode = CURRENT_POSTCODE, 
-         chi_previous_postcode = PREVIOUS_POSTCODE, 
-         chi_date_postcode_change = DATE_ADDRESS_CHANGED) %>% 
-  mutate(chi_dob = as_date(chi_dob))
+##replace the CHI number in each source with the UPI from the CHI team lookup
+##so that records for the same person link together across sources.
+##CHIs with no match in the lookup are kept unchanged.
+chi_upi_lookup <- read_chi_upi_lookup()
+
+smr_all <- apply_upi(smr_all, "upi_number", chi_upi_lookup)
+PDS <- apply_upi(PDS, "pds_chi_number", chi_upi_lookup)
+dementia_deaths <- apply_upi(dementia_deaths, "upi_number", chi_upi_lookup)
+CHC <- apply_upi(CHC, "CHC_UPI_NUMBER", chi_upi_lookup)
+social_care <- apply_upi(social_care, "upi_number", chi_upi_lookup)
+PIS <- apply_upi(PIS, "pis_pat_upi_c", chi_upi_lookup)
 
 ##Clean source names and select minimal required demographics####
 ##reame for consistency
@@ -71,7 +67,7 @@ PIS <- PIS %>% mutate(diagnosis_description = "prescription from BNF ch4.11") %>
          sex = pis_sex, 
          dob = pis_dob,
          ethnic_group = pis_ethnic_group) %>%
-  mutate(date_type="date_prescribed") %>% select(-pis_CHI_dob)
+  mutate(date_type="date_prescribed")
 
 names(dementia_deaths)
 PDS <- PDS %>%
@@ -91,7 +87,7 @@ social_care <- social_care %>%
          ethnic_group = submitted_ethnic_group, 
          postcode = best_postcode, 
          diagnosis_description = dementia_type
-  ) %>% select(-c(chi_gender, DATE_OF_BIRTH, social_care_id,financial_year,
+  ) %>% select(-c(chi_gender, social_care_id,financial_year,
                   quarter_client,financial_quarter_care_first, quarter_client_date,
                   dementia, quarter_fin_date, year_client_date, submitted_postcode)) %>%
   mutate(source="social care")
@@ -115,42 +111,26 @@ df <- df %>% select(upi_number, diagnosis_date, diagnosis, diagnosis_description
                     dob, sex, postcode, ch_postcode, everything())
 names(df)
 
+##a person can hold several CHI numbers over time. Now that these are all
+##revised to the same UPI, remove any duplicate records this creates within
+##a source, keeping the earliest record
+df <- df %>%
+  group_by(upi_number, source, diagnosis, diagnosis_description, type_of_care_group) %>%
+  arrange(diagnosis_date) %>%
+  slice(1) %>%
+  ungroup()
+
 ##identify unlinked deaths in dementia deaths####
 upi_list <- unique(df$upi_number)
 unlinked_deaths <- dementia_deaths %>% filter(!upi_number %in% upi_list)
 names(unlinked_deaths)
-##extract nrs date of death####
-death_start_date <- as.Date("2014-01-01")
-##identify any duplicate deaths before linking to main list. 
-deaths_temp_1 <- as_tibble(
-  dbGetQuery(
-    SMRAConnection, paste0(
-      "SELECT UPI_NUMBER,CHI, DATE_OF_BIRTH, DATE_OF_DEATH,
-     YEAR_OF_REGISTRATION , REGISTRATION_DISTRICT, ENTRY_NUMBER ,
-     SEX, POSTCODE,HEALTH_BOARD_AREA
-    FROM ANALYSIS.GRO_DEATHS_C SMR
-    WHERE DATE_OF_DEATH >= TO_DATE('", death_start_date, "', 'yyyy-mm-dd')
-    ")
-  )) %>% clean_names()
+##load nrs date of death####
+##all deaths since 2014, extracted and saved in "02.Compile CHI list.r"
+deaths_temp_1 <- readRDS("/PHI_conf/Dementia_Index/data/extracts/all_deaths.rds")
 
-#table(is.na(deaths_temp_1$chi) , is.na(deaths_temp_1$upi_number))
-###use chi if upi unavlaible, remove those with missing chi and upi
-deaths_temp_1 <- deaths_temp_1 %>% mutate(deaths_upi = case_when(is.na(upi_number)~ chi , T~upi_number)) %>%
-  select(-chi, -upi_number)  
-
-death_upi <- SMRAConnection %>% tbl(dbplyr::in_schema("UPIP", "L_UPI_DATA")) %>% 
-  inner_join(deaths_temp_1 %>% select(deaths_upi) %>% rename(CHI_NUMBER = deaths_upi), copy = TRUE) %>%
-  filter(is.na(DELETION_INDICATOR)) %>% # remove any that have been marked as deleted
-  select(CHI_NUMBER,UPI_NUMBER) %>%
-  distinct() %>% 
-  collect()
-##se
-deaths_temp_1 <- deaths_temp_1 %>% left_join(death_upi, by = c("deaths_upi" = "CHI_NUMBER"))
-#table(deaths_temp_1$deaths_upi==deaths_temp_1$UPI_NUMBER, useNA="always")
-
-##update the upi and remove records where no upi or chi can be found
-deaths_temp_1 <- deaths_temp_1 %>% mutate(deaths_upi=case_when(is.na(UPI_NUMBER)~ deaths_upi, T~UPI_NUMBER)) %>%
-  filter(!is.na(deaths_upi))
+##revise the death record CHIs to the UPI using the CHI team lookup
+##identify any duplicate deaths before linking to main list.
+deaths_temp_1 <- apply_upi(deaths_temp_1, "deaths_upi", chi_upi_lookup)
 length(unique(deaths_temp_1$deaths_upi))
 nrow(deaths_temp_1)
 

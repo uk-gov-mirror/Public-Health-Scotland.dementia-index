@@ -71,36 +71,23 @@ table(phsmethods::chi_check(SC$chi))
 
 
 
-##chi - UPI lookup####
-clear_temp_tables(SMRAConnection)
-upis <- SMRAConnection %>% tbl(dbplyr::in_schema("UPIP", "L_UPI_DATA")) %>% 
-  inner_join(SC %>% rename(CHI_NUMBER = chi), copy = TRUE) %>%
-  filter(is.na(DELETION_INDICATOR)) %>% # remove any that have been marked as deleted
-  select(CHI_NUMBER,UPI_NUMBER, DATE_OF_BIRTH) %>%
-  distinct() %>% 
-  collect()
-
-names(upis)
-names(SC)
-SC<- left_join(SC, upis, by=c("chi"="CHI_NUMBER"))
-table(SC$chi[is.na(SC$UPI_NUMBER)])
-
-SC <-SC %>% mutate(grouping_chi = case_when(!is.na(UPI_NUMBER) ~ UPI_NUMBER, T~chi))
-
 ### retain first social care care home record ####
 #and first social care any other type###
-SC_first <-SC %>% 
-  mutate(type_care2 = case_when(type_of_care=="care home" ~ "care home", 
+##note: grouping here is on the CHI as submitted to social care.
+##CHIs are revised to their most recent version (the UPI) in "03.Link sources.r"
+##using the CHI team lookup, and any duplicates arising from a person holding
+##more than one CHI are resolved there.
+SC_first <-SC %>%
+  mutate(type_care2 = case_when(type_of_care=="care home" ~ "care home",
                                 type_of_care=="not recorded" ~ "not recorded",
                                 T~ "other care")) %>%
-  group_by(grouping_chi, type_care2) %>%
+  group_by(chi, type_care2) %>%
   arrange(diagnosis_date) %>%
-  slice(1) %>% 
+  slice(1) %>%
   ungroup()  %>%
   mutate(dementia_type = "99 Social care flag") %>%
-  rename(type_of_care_group = type_care2) %>% 
-  rename(upi_number = grouping_chi) %>%
-  select(-c(chi, UPI_NUMBER))
+  rename(type_of_care_group = type_care2) %>%
+  rename(upi_number = chi)
 
 
 #SC_first <- SC_first %>%

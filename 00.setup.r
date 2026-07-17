@@ -67,7 +67,37 @@ dementia_parkinson <- "F023"
 dementia_hiv <- "F024"
 bnf <- "0411"
 
+##CHI to UPI lookup####
+##We no longer have access to the UPIP database, so CHIs cannot be resolved
+##to their most recent version (the UPI) in-house. Instead we send the CHI
+##team a list of all CHI numbers in our sources ("02.Compile CHI list.r")
+##and they return the same list with a "upi" column added.
+##Save the returned file at the path below before running "03.Link sources.r".
+chi_upi_lookup_path <- paste0(folder_data_path, "/lookups/chi_upi_lookup.csv")
+
 ##functions####
+
+read_chi_upi_lookup <- function(path = chi_upi_lookup_path){
+  ##reads the completed chi-upi lookup returned by the CHI team
+  if(!file.exists(path)){
+    stop("CHI-UPI lookup not found at: ", path,
+         "\nRun '02.Compile CHI list.r', send the CHI list to the CHI team,",
+         "\nand save their returned file (columns: chi, upi) at the path above.")
+  }
+  read_csv(path, col_types = cols(.default = col_character())) %>%
+    clean_names() %>%
+    select(chi, upi) %>%
+    filter(!is.na(chi) & !is.na(upi)) %>%
+    distinct()
+}
+
+apply_upi <- function(df, chi_col, lookup){
+  ##replaces the CHI numbers in chi_col with the UPI from the CHI team lookup
+  ##CHIs with no match in the lookup are kept unchanged
+  matched_upi <- lookup$upi[match(df[[chi_col]], lookup$chi)]
+  df[[chi_col]] <- coalesce(matched_upi, df[[chi_col]])
+  df
+}
 
 clear_temp_tables <- function(conn){
   # clears old dbplyr tables off the SQL database where possible
